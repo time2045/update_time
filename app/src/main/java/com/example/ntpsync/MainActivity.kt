@@ -2,6 +2,7 @@ package com.example.ntpsync
 
 import android.app.Application
 import android.os.Bundle
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -35,6 +36,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -78,6 +82,10 @@ data class SyncUiState(
     val delayMillis: Long? = null,
     val statusKind: StatusKind = StatusKind.NONE,
     val statusText: String = "添加服务器后点同步",
+    /** 当前系统 NTP 服务器（null = 尚未读取） */
+    val systemNtp: String? = null,
+    /** 是否已获得一次性 ADB 授权（null = 尚未检测） */
+    val hasSecureSettings: Boolean? = null,
 )
 
 /**
@@ -87,6 +95,7 @@ class SyncViewModel(app: Application) : AndroidViewModel(app) {
 
     private val settings = SettingsStore(app)
     private val manager = TimeSyncManager(app)
+    private val switcher = SystemNtpSwitcher(app)
     private val addressValidator = NtpClient()
 
     private val _ui = MutableStateFlow(SyncUiState())
@@ -111,7 +120,72 @@ class SyncViewModel(app: Application) : AndroidViewModel(app) {
             _ui.update {
                 it.copy(servers = saved.map { addr -> ServerUiItem(addr) })
             }
+            refreshSystemNtp()
             doSync()
+        }
+    }
+
+    /** 读取系统 NTP 当前值 + 授权状态（供“一键切换”卡片展示） */
+    fun refreshSystemNtp() {
+        viewModelScope.launch {
+            val granted = try {
+                switcher.hasPermission()
+            } catch (e: Exception) {
+                false
+            }
+            val current = if (granted) {
+                try {
+                    switcher.getSystemServer()
+                } catch (e: Exception) {
+                    null
+                }
+            } else {
+                null
+            }
+            _ui.update { it.copy(hasSecureSettings = granted, systemNtp = current) }
+        }
+    }
+
+    /**
+     * 把系统 NTP 切换到指定服务器（取 host 部分，系统 NTP 固定 UDP 123）。
+     * 只保证“设置已写入”，不谎报时间已同步。
+     */
+    fun applySystemNtp(address: String) {
+        if (_ui.value.syncing) return
+        viewModelScope.launch {
+            val host = try {
+                addressValidator.parseServerAddress(address).host
+            } catch (e: IllegalArgumentException) {
+                _ui.update {
+                    it.copy(
+                        statusKind = StatusKind.FAILED,
+                        statusText = "✕ 地址无效：${e.message}",
+                    )
+                }
+                return@launch
+            }
+            _ui.update {
+                it.copy(statusKind = StatusKind.SYNCING, statusText = "正在切换系统 NTP...")
+            }
+            val result = switcher.apply(host)
+            refreshSystemNtp()
+            _ui.update { cur ->
+                result.fold(
+                    onSuccess = {
+                        cur.copy(
+                            statusKind = StatusKind.SUCCESS,
+                            statusText = "✓ 系统 NTP 已切换为 $host\n" +
+                                "系统正在后台同步（通常 1 分钟内生效），请稍后查看本机时间。",
+                        )
+                    },
+                    onFailure = { e ->
+                        cur.copy(
+                            statusKind = StatusKind.FAILED,
+                            statusText = "✕ ${e.message}",
+                        )
+                    },
+                )
+            }
         }
     }
 
@@ -276,6 +350,8 @@ class MainActivity : ComponentActivity() {
                     onRemove = vm::removeServer,
                     onMove = vm::moveServer,
                     onSync = vm::sync,
+                    onApplySystem = vm::applySystemNtp,
+                    onRefreshSystem = vm::refreshSystemNtp,
                 )
             }
         }
@@ -291,6 +367,8 @@ fun SyncScreen(
     onRemove: (Int) -> Unit,
     onMove: (Int, Int) -> Unit,
     onSync: () -> Unit,
+    onApplySystem: (String) -> Unit,
+    onRefreshSystem: () -> Unit,
 ) {
     // 本机时间每秒刷新
     var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
@@ -318,6 +396,12 @@ fun SyncScreen(
                 onAdd = onAdd,
                 onRemove = onRemove,
                 onMove = onMove,
+                onApplySystem = onApplySystem,
+            )
+
+            SystemNtpCard(
+                state = state,
+                onRefresh = onRefreshSystem,
             )
 
             Button(
@@ -382,6 +466,7 @@ fun ServerListCard(
     onAdd: () -> Unit,
     onRemove: (Int) -> Unit,
     onMove: (Int, Int) -> Unit,
+    onApplySystem: (String) -> Unit,
 ) {
     ElevatedCard(modifier = Modifier.fillMaxWidth()) {
         Column(
@@ -405,10 +490,12 @@ fun ServerListCard(
                     index = index,
                     item = item,
                     isActive = item.address == state.activeServer,
+                    canApplySystem = state.hasSecureSettings == true,
                     syncing = state.syncing,
                     onRemove = { onRemove(index) },
                     onMoveUp = { onMove(index, -1) },
                     onMoveDown = { onMove(index, 1) },
+                    onApplySystem = { onApplySystem(item.address) },
                 )
                 if (index < state.servers.lastIndex) {
                     HorizontalDivider()
@@ -444,16 +531,18 @@ fun ServerListCard(
     }
 }
 
-/** 服务器列表中的一行：序号 + 地址 + 状态 + 上移/下移/删除 */
+/** 服务器列表中的一行：序号 + 地址 + 状态 + 设为系统/排序/删除 */
 @Composable
 fun ServerRow(
     index: Int,
     item: ServerUiItem,
     isActive: Boolean,
+    canApplySystem: Boolean,
     syncing: Boolean,
     onRemove: () -> Unit,
     onMoveUp: () -> Unit,
     onMoveDown: () -> Unit,
+    onApplySystem: () -> Unit,
 ) {
     Row(
         modifier = Modifier.fillMaxWidth(),
@@ -499,6 +588,9 @@ fun ServerRow(
         TextButton(onClick = onMoveUp, enabled = !syncing) { Text("↑") }
         TextButton(onClick = onMoveDown, enabled = !syncing) { Text("↓") }
         TextButton(onClick = onRemove, enabled = !syncing) { Text("删除") }
+        if (canApplySystem) {
+            FilledTonalButton(onClick = onApplySystem, enabled = !syncing) { Text("设为系统") }
+        }
     }
 }
 
@@ -517,6 +609,68 @@ fun statusColor(lastOk: Boolean?): Color {
         true -> colors.primary
         false -> colors.error
         null -> colors.onSurfaceVariant
+    }
+}
+
+/** 系统 NTP 一键切换卡片：显示系统当前值 + 授权状态 + 设置向导 */
+@Composable
+fun SystemNtpCard(
+    state: SyncUiState,
+    onRefresh: () -> Unit,
+) {
+    val clipboard = LocalClipboardManager.current
+    val context = LocalContext.current
+    val granted = state.hasSecureSettings == true
+
+    ElevatedCard(modifier = Modifier.fillMaxWidth()) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text = "系统 NTP（一键切换）",
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.weight(1f),
+                )
+                TextButton(onClick = onRefresh) { Text("刷新") }
+            }
+            Text(
+                text = if (granted) {
+                    "当前系统：${state.systemNtp ?: "未知"}\n" +
+                        "点服务器右侧「设为系统」，1 分钟内生效，在局域网/公网间随便切。"
+                } else {
+                    "未授权，无法切换。只需用电脑执行一次下面命令（无需恢复出厂、不删账号）："
+                },
+                style = MaterialTheme.typography.bodyMedium,
+            )
+            if (!granted) {
+                Text(
+                    text = SystemNtpSwitcher.GRANT_CMD,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.primary,
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    FilledTonalButton(
+                        onClick = {
+                            clipboard.setText(AnnotatedString(SystemNtpSwitcher.GRANT_CMD))
+                            Toast.makeText(context, "授权命令已复制", Toast.LENGTH_SHORT).show()
+                        },
+                    ) {
+                        Text("复制命令")
+                    }
+                }
+                Text(
+                    text = "执行成功后点右上角「刷新」，再点「设为系统」即可。",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
     }
 }
 

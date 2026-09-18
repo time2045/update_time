@@ -3,6 +3,10 @@
 
     <!-- 唯一需要的权限：NTP 走 UDP 访问局域网服务器 -->
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- 系统 NTP 一键切换：签名级权限，安装时拿不到，需用户用 ADB 授权一次
+         (adb shell pm grant com.example.ntpsync android.permission.WRITE_SECURE_SETTINGS)。
+         不授权不影响 App 其他功能（NTP 查询与偏差显示照常可用）。 -->
+    <uses-permission android:name="android.permission.WRITE_SECURE_SETTINGS" />
 
     <application
         android:allowBackup="true"
