@@ -1,0 +1,20 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- 极简时钟：表盘 + 时针 + 分针 -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M54,30m-24,0a24,24 0,1 1,48 0a24,24 0,1 1,-48 0" />
+    <path
+        android:strokeColor="#0B57D0"
+        android:strokeWidth="4"
+        android:strokeLineCap="round"
+        android:pathData="M54,54 L54,40" />
+    <path
+        android:strokeColor="#0B57D0"
+        android:strokeWidth="4"
+        android:strokeLineCap="round"
+        android:pathData="M54,54 L66,60" />
+</vector>

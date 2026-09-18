@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Device Admin 配置。
+     DevicePolicyManager.setTime() 只要求调用方是 Device Owner（API 26+），
+     不需要在此声明专用 policy，因此 uses-policies 保持为空。
+     为避免使用不存在的 policy 标签导致解析失败，不要随意添加子标签。 -->
+<device-admin xmlns:android="http://schemas.android.com/apk/res/android">
+    <uses-policies>
+    </uses-policies>
+</device-admin>

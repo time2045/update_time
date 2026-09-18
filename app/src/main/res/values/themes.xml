@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Compose 接管界面绘制，Activity 只需要一个无标题栏的基主题 -->
+    <style name="Theme.NtpSync" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:windowBackground">@color/ic_launcher_background</item>
+    </style>
+</resources>
