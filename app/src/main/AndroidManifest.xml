@@ -37,6 +37,15 @@
                 <action android:name="android.app.action.DEVICE_ADMIN_ENABLED" />
             </intent-filter>
         </receiver>
+
+        <!-- Shizuku 客户端标识：Shizuku 管理器靠它找到本 App 并弹窗授权。
+             不装 Shizuku 时毫无影响。 -->
+        <provider
+            android:name="rikka.shizuku.ShizukuProvider"
+            android:authorities="${applicationId}.shizuku"
+            android:exported="true"
+            android:enabled="true"
+            android:multiprocess="false" />
     </application>
 
 </manifest>

@@ -1,6 +1,7 @@
 package com.example.ntpsync
 
 import android.app.Application
+import android.content.pm.PackageManager
 import android.os.Bundle
 import android.widget.Toast
 import androidx.activity.ComponentActivity
@@ -44,8 +45,8 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.AndroidViewModel
+import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
-import androidx.lifecycle.viewmodel.compose.viewModel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -53,6 +54,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import rikka.shizuku.Shizuku
 
 /** 状态类型：决定状态卡片的颜色与文案 */
 enum class StatusKind {
@@ -86,6 +88,8 @@ data class SyncUiState(
     val systemNtp: String? = null,
     /** 是否已获得一次性 ADB 授权（null = 尚未检测） */
     val hasSecureSettings: Boolean? = null,
+    /** Shizuku 服务是否在运行（免电脑授权通道） */
+    val shizukuAvailable: Boolean = false,
 )
 
 /**
@@ -142,7 +146,44 @@ class SyncViewModel(app: Application) : AndroidViewModel(app) {
             } else {
                 null
             }
-            _ui.update { it.copy(hasSecureSettings = granted, systemNtp = current) }
+            val shizuku = try {
+                ShizukuHelper.isRunning()
+            } catch (e: Exception) {
+                false
+            }
+            _ui.update {
+                it.copy(
+                    hasSecureSettings = granted,
+                    systemNtp = current,
+                    shizukuAvailable = shizuku,
+                )
+            }
+        }
+    }
+
+    /** 通过 Shizuku 给自己授权（Shizuku 弹窗允许后由 Activity 回调触发） */
+    fun grantViaShizuku() {
+        viewModelScope.launch {
+            _ui.update {
+                it.copy(statusKind = StatusKind.SYNCING, statusText = "正在通过 Shizuku 授权...")
+            }
+            val ok = ShizukuHelper.grantSelf(getApplication())
+            refreshSystemNtp()
+            _ui.update { cur ->
+                if (ok) {
+                    cur.copy(
+                        statusKind = StatusKind.SUCCESS,
+                        statusText = "✓ 授权成功！以后点服务器右侧「设为系统」即可切换，" +
+                            "不再需要电脑和 Shizuku。",
+                    )
+                } else {
+                    cur.copy(
+                        statusKind = StatusKind.FAILED,
+                        statusText = "✕ 授权失败：请确认 Shizuku 已启动并允许本 App，" +
+                            "或 Shizuku 版本过旧请升级。",
+                    )
+                }
+            }
         }
     }
 
@@ -334,12 +375,33 @@ class SyncViewModel(app: Application) : AndroidViewModel(app) {
 
 class MainActivity : ComponentActivity() {
 
+    companion object {
+        private const val SHIZUKU_REQUEST_CODE = 1001
+    }
+
+    private lateinit var vm: SyncViewModel
+
+    private val shizukuListener =
+        Shizuku.OnRequestPermissionResultListener { requestCode, grantResult ->
+            if (requestCode != SHIZUKU_REQUEST_CODE) return@OnRequestPermissionResultListener
+            if (grantResult == PackageManager.PERMISSION_GRANTED) {
+                vm.grantViaShizuku()
+            } else {
+                Toast.makeText(this, "Shizuku 授权被拒绝", Toast.LENGTH_SHORT).show()
+            }
+        }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        vm = ViewModelProvider(this)[SyncViewModel::class.java]
+        try {
+            Shizuku.addRequestPermissionResultListener(shizukuListener)
+        } catch (e: Exception) {
+            // 未安装 Shizuku 相关环境也不影响主功能
+        }
         enableEdgeToEdge()
         setContent {
             MaterialTheme {
-                val vm: SyncViewModel = viewModel()
                 val ui by vm.ui.collectAsState()
                 // 每次打开 App 自动执行一次同步
                 LaunchedEffect(Unit) { vm.start() }
@@ -352,7 +414,34 @@ class MainActivity : ComponentActivity() {
                     onSync = vm::sync,
                     onApplySystem = vm::applySystemNtp,
                     onRefreshSystem = vm::refreshSystemNtp,
+                    onShizukuGrant = { requestShizukuGrant() },
                 )
+            }
+        }
+    }
+
+    override fun onDestroy() {
+        try {
+            Shizuku.removeRequestPermissionResultListener(shizukuListener)
+        } catch (e: Exception) {
+            // 忽略
+        }
+        super.onDestroy()
+    }
+
+    /** Shizuku 一键授权入口：已授权则直接执行，未授权则弹窗申请 */
+    private fun requestShizukuGrant() {
+        if (!ShizukuHelper.isRunning()) {
+            Toast.makeText(this, "Shizuku 未运行，请先安装并启动 Shizuku", Toast.LENGTH_LONG).show()
+            return
+        }
+        if (ShizukuHelper.isPermissionGranted()) {
+            vm.grantViaShizuku()
+        } else {
+            try {
+                Shizuku.requestPermission(SHIZUKU_REQUEST_CODE)
+            } catch (e: Exception) {
+                Toast.makeText(this, "请求 Shizuku 授权失败", Toast.LENGTH_SHORT).show()
             }
         }
     }
@@ -369,6 +458,7 @@ fun SyncScreen(
     onSync: () -> Unit,
     onApplySystem: (String) -> Unit,
     onRefreshSystem: () -> Unit,
+    onShizukuGrant: () -> Unit,
 ) {
     // 本机时间每秒刷新
     var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
@@ -402,6 +492,7 @@ fun SyncScreen(
             SystemNtpCard(
                 state = state,
                 onRefresh = onRefreshSystem,
+                onShizukuGrant = onShizukuGrant,
             )
 
             Button(
@@ -617,6 +708,7 @@ fun statusColor(lastOk: Boolean?): Color {
 fun SystemNtpCard(
     state: SyncUiState,
     onRefresh: () -> Unit,
+    onShizukuGrant: () -> Unit,
 ) {
     val clipboard = LocalClipboardManager.current
     val context = LocalContext.current
@@ -663,6 +755,19 @@ fun SystemNtpCard(
                     ) {
                         Text("复制命令")
                     }
+                    if (state.shizukuAvailable) {
+                        FilledTonalButton(onClick = onShizukuGrant) {
+                            Text("通过 Shizuku 一键授权")
+                        }
+                    }
+                }
+                if (!state.shizukuAvailable) {
+                    Text(
+                        text = "免电脑方案：安装 Shizuku 并完成无线调试配对、启动后，" +
+                            "点本卡「刷新」，就会出现一键授权按钮。",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                 }
                 Text(
                     text = "执行成功后点右上角「刷新」，再点「设为系统」即可。",
