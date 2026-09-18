@@ -37,6 +37,13 @@ class SystemNtpSwitcher(
         const val GRANT_CMD =
             "adb shell pm grant com.example.ntpsync android.permission.WRITE_SECURE_SETTINGS"
 
+        /**
+         * 系统 NTP 服务器的 settings key。
+         * 注意：Settings.Global 没有提供该常量，平台内部用的就是裸字符串，
+         * 与 `settings put global ntp_server <host>` 是同一个 key。
+         */
+        private const val KEY_NTP_SERVER = "ntp_server"
+
         /** 关/开 auto_time 之间的间隔，给系统留出状态落盘时间 */
         private const val TOGGLE_DELAY_MILLIS = 1000L
     }
@@ -51,7 +58,7 @@ class SystemNtpSwitcher(
     /** 读取当前系统 NTP 服务器（未设置时返回 null） */
     fun getSystemServer(): String? =
         try {
-            Settings.Global.getString(context.contentResolver, Settings.Global.NTP_SERVER)
+            Settings.Global.getString(context.contentResolver, KEY_NTP_SERVER)
         } catch (e: Exception) {
             Log.w(TAG, "读取系统 NTP 失败: ${e.message}")
             null
@@ -68,7 +75,7 @@ class SystemNtpSwitcher(
         try {
             val resolver = context.contentResolver
             Log.d(TAG, "Setting system NTP server = $host")
-            Settings.Global.putString(resolver, Settings.Global.NTP_SERVER, host)
+            Settings.Global.putString(resolver, KEY_NTP_SERVER, host)
             // 关再开，强制系统立即用新服务器同步一次
             Settings.Global.putInt(resolver, Settings.Global.AUTO_TIME, 0)
             delay(TOGGLE_DELAY_MILLIS)
