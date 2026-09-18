@@ -27,7 +27,14 @@ android {
 
     buildTypes {
         release {
-            isMinifyEnabled = false
+            // R8：压缩 dex + 收缩无用资源，release 体积从 ~6.7MB 降到 ~3MB。
+            // debug 保持原样（方便调试，体积大是正常的）。
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro",
+            )
             // CI 产物直接用 debug 签名，保证可直接安装。
             // 正式发布请替换为自己的 keystore。
             signingConfig = signingConfigs.getByName("debug")
