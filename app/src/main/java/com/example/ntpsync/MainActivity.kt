@@ -7,18 +7,24 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
-import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.ElevatedCard
+import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -28,8 +34,11 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -50,46 +59,109 @@ enum class StatusKind {
     FAILED,
 }
 
+/** 服务器列表中的一项：lastOk 为空表示尚未尝试过 */
+data class ServerUiItem(
+    val address: String,
+    val lastOk: Boolean? = null,
+    val lastError: String = "",
+)
+
 /** 界面状态：单页面所有展示数据 */
 data class SyncUiState(
-    val serverInput: String = SettingsStore.DEFAULT_SERVER,
+    val servers: List<ServerUiItem> = emptyList(),
+    val newInput: String = "",
+    val inputError: String? = null,
     val syncing: Boolean = false,
+    val activeServer: String? = null,
     val ntpTime: Long? = null,
     val offsetMillis: Long? = null,
     val delayMillis: Long? = null,
     val statusKind: StatusKind = StatusKind.NONE,
-    val statusText: String = "等待同步",
+    val statusText: String = "添加服务器后点同步",
 )
 
 /**
- * 极简 ViewModel：不引入 Hilt 等框架，只负责“存档地址读写 + 触发同步 + 状态更新”。
+ * 极简 ViewModel：不引入 Hilt 等框架，只负责“列表维护 + 存档 + 触发同步 + 状态更新”。
  */
 class SyncViewModel(app: Application) : AndroidViewModel(app) {
 
     private val settings = SettingsStore(app)
     private val manager = TimeSyncManager(app)
+    private val addressValidator = NtpClient()
 
     private val _ui = MutableStateFlow(SyncUiState())
     val ui: StateFlow<SyncUiState> = _ui.asStateFlow()
 
     private var started = false
 
-    fun onInput(value: String) {
-        _ui.update { it.copy(serverInput = value) }
+    fun onNewInput(value: String) {
+        _ui.update { it.copy(newInput = value, inputError = null) }
     }
 
-    /** 界面首次展示时调用：读取上次保存的地址并自动同步一次 */
+    /** 界面首次展示时调用：读取存档列表并自动同步一次 */
     fun start() {
         if (started) return
         started = true
         viewModelScope.launch {
             val saved = try {
-                settings.serverFlow.first()
+                settings.serversFlow.first()
             } catch (e: Exception) {
-                SettingsStore.DEFAULT_SERVER
+                SettingsStore.DEFAULT_SERVERS
             }
-            _ui.update { it.copy(serverInput = saved) }
+            _ui.update {
+                it.copy(servers = saved.map { addr -> ServerUiItem(addr) })
+            }
             doSync()
+        }
+    }
+
+    /** 添加服务器（格式校验，不允许重复） */
+    fun addServer() {
+        val input = _ui.value.newInput.trim()
+        if (input.isEmpty()) {
+            _ui.update { it.copy(inputError = "请输入服务器地址") }
+            return
+        }
+        try {
+            addressValidator.parseServerAddress(input)
+        } catch (e: IllegalArgumentException) {
+            _ui.update { it.copy(inputError = "地址无效：${e.message}") }
+            return
+        }
+        if (_ui.value.servers.any { it.address == input }) {
+            _ui.update { it.copy(inputError = "该服务器已在列表中") }
+            return
+        }
+        viewModelScope.launch {
+            val next = _ui.value.servers + ServerUiItem(input)
+            persist(next)
+            _ui.update { it.copy(servers = next, newInput = "", inputError = null) }
+        }
+    }
+
+    /** 删除服务器 */
+    fun removeServer(index: Int) {
+        viewModelScope.launch {
+            val next = _ui.value.servers.toMutableList()
+            if (index in next.indices) {
+                next.removeAt(index)
+                persist(next)
+                _ui.update { it.copy(servers = next) }
+            }
+        }
+    }
+
+    /** 上移 / 下移：顺序即同步优先级 */
+    fun moveServer(index: Int, delta: Int) {
+        viewModelScope.launch {
+            val next = _ui.value.servers.toMutableList()
+            val target = index + delta
+            if (index in next.indices && target in next.indices) {
+                val item = next.removeAt(index)
+                next.add(target, item)
+                persist(next)
+                _ui.update { it.copy(servers = next) }
+            }
         }
     }
 
@@ -99,52 +171,74 @@ class SyncViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch { doSync() }
     }
 
+    private suspend fun persist(servers: List<ServerUiItem>) {
+        try {
+            settings.saveServers(servers.map { it.address })
+        } catch (e: Exception) {
+            // 存档失败不阻断操作
+        }
+    }
+
     private suspend fun doSync() {
-        val input = _ui.value.serverInput
+        val servers = _ui.value.servers
         _ui.update {
             it.copy(syncing = true, statusKind = StatusKind.SYNCING, statusText = "正在同步...")
         }
-        // 先保存用户输入的地址（保存失败不阻断同步）
-        try {
-            settings.saveServer(input)
-        } catch (e: Exception) {
-            // 忽略
-        }
+        persist(servers)
 
-        val outcome = manager.sync(input)
+        val outcome = manager.syncInOrder(servers.map { it.address })
+
         _ui.update { cur ->
+            // 先把逐台尝试结果回填到列表行
+            val attempts = when (outcome) {
+                is TimeSyncManager.SyncOutcome.EmptyServers -> emptyList()
+                is TimeSyncManager.SyncOutcome.AllNtpFailed -> outcome.attempts
+                is TimeSyncManager.SyncOutcome.NoPermission -> outcome.attempts
+                is TimeSyncManager.SyncOutcome.Success -> outcome.attempts
+                is TimeSyncManager.SyncOutcome.SyncFailed -> outcome.attempts
+            }
+            val marked = cur.servers.map { item ->
+                val hit = attempts.lastOrNull { it.server == item.address }
+                if (hit == null) {
+                    item.copy(lastOk = null, lastError = "")
+                } else {
+                    item.copy(lastOk = hit.ntp != null, lastError = hit.error ?: "")
+                }
+            }
+            val base = cur.copy(servers = marked, syncing = false)
             when (outcome) {
-                is TimeSyncManager.SyncOutcome.Success -> cur.copy(
-                    syncing = false,
-                    ntpTime = outcome.ntp.serverTimeMillis,
-                    offsetMillis = outcome.ntp.offsetMillis,
-                    delayMillis = outcome.ntp.delayMillis,
-                    statusKind = StatusKind.SUCCESS,
-                    statusText = "✓ 同步成功",
+                is TimeSyncManager.SyncOutcome.EmptyServers -> base.copy(
+                    statusKind = StatusKind.FAILED,
+                    statusText = "✕ ${outcome.message}",
                 )
-                is TimeSyncManager.SyncOutcome.NoPermission -> cur.copy(
-                    syncing = false,
+                is TimeSyncManager.SyncOutcome.AllNtpFailed -> base.copy(
+                    statusKind = StatusKind.FAILED,
+                    statusText = "✕ 所有服务器均同步失败\n" +
+                        outcome.attempts.joinToString("\n") { "• ${it.server}：${it.error}" } +
+                        "\n\n请检查：\n" +
+                        "1. 设备是否接入对应网络\n" +
+                        "2. 服务器地址是否正确\n" +
+                        "3. UDP 123 是否开放",
+                )
+                is TimeSyncManager.SyncOutcome.NoPermission -> base.copy(
+                    activeServer = outcome.server,
                     ntpTime = outcome.ntp.serverTimeMillis,
                     offsetMillis = outcome.ntp.offsetMillis,
                     delayMillis = outcome.ntp.delayMillis,
                     statusKind = StatusKind.NO_PERMISSION,
-                    statusText = "⚠ 获取NTP时间成功，但没有修改系统时间的权限。\n${outcome.message}",
+                    statusText = "⚠ ${outcome.server} 获取NTP时间成功，" +
+                        "但没有修改系统时间的权限。\n${outcome.message}",
                 )
-                is TimeSyncManager.SyncOutcome.NtpFailed -> cur.copy(
-                    syncing = false,
-                    statusKind = StatusKind.FAILED,
-                    statusText = "✕ 同步失败\n${outcome.message}\n\n请检查：\n" +
-                        "1. Android 设备是否连接局域网\n" +
-                        "2. NTP 服务器地址是否正确\n" +
-                        "3. UDP 123 是否开放",
+                is TimeSyncManager.SyncOutcome.Success -> base.copy(
+                    activeServer = outcome.server,
+                    ntpTime = outcome.ntp.serverTimeMillis,
+                    offsetMillis = outcome.ntp.offsetMillis,
+                    delayMillis = outcome.ntp.delayMillis,
+                    statusKind = StatusKind.SUCCESS,
+                    statusText = "✓ 同步成功（${outcome.server}）",
                 )
                 is TimeSyncManager.SyncOutcome.SyncFailed -> {
-                    val base = cur.copy(
-                        syncing = false,
-                        statusKind = StatusKind.FAILED,
-                        statusText = "✕ 同步失败\n${outcome.message}",
-                    )
-                    if (outcome.ntp != null) {
+                    val withNtp = if (outcome.ntp != null) {
                         base.copy(
                             ntpTime = outcome.ntp.serverTimeMillis,
                             offsetMillis = outcome.ntp.offsetMillis,
@@ -153,6 +247,11 @@ class SyncViewModel(app: Application) : AndroidViewModel(app) {
                     } else {
                         base
                     }
+                    withNtp.copy(
+                        activeServer = outcome.server,
+                        statusKind = StatusKind.FAILED,
+                        statusText = "✕ 同步失败（${outcome.server}）\n${outcome.message}",
+                    )
                 }
             }
         }
@@ -172,7 +271,10 @@ class MainActivity : ComponentActivity() {
                 LaunchedEffect(Unit) { vm.start() }
                 SyncScreen(
                     state = ui,
-                    onInput = vm::onInput,
+                    onNewInput = vm::onNewInput,
+                    onAdd = vm::addServer,
+                    onRemove = vm::removeServer,
+                    onMove = vm::moveServer,
                     onSync = vm::sync,
                 )
             }
@@ -180,11 +282,14 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-/** 主界面：标题 + 地址输入 + 同步按钮 + 时间/偏差/状态展示 */
+/** 主界面 */
 @Composable
 fun SyncScreen(
     state: SyncUiState,
-    onInput: (String) -> Unit,
+    onNewInput: (String) -> Unit,
+    onAdd: () -> Unit,
+    onRemove: (Int) -> Unit,
+    onMove: (Int, Int) -> Unit,
     onSync: () -> Unit,
 ) {
     // 本机时间每秒刷新
@@ -201,59 +306,317 @@ fun SyncScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(padding)
-                .padding(20.dp)
+                .padding(horizontal = 20.dp, vertical = 16.dp)
                 .verticalScroll(rememberScrollState()),
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(12.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
-            Text(
-                text = "局域网 NTP 校时",
-                style = MaterialTheme.typography.headlineSmall,
-            )
+            Header()
 
-            OutlinedTextField(
-                value = state.serverInput,
-                onValueChange = onInput,
-                label = { Text("NTP服务器") },
-                placeholder = { Text(SettingsStore.DEFAULT_SERVER) },
-                singleLine = true,
-                enabled = !state.syncing,
-                modifier = Modifier.fillMaxWidth(),
+            ServerListCard(
+                state = state,
+                onNewInput = onNewInput,
+                onAdd = onAdd,
+                onRemove = onRemove,
+                onMove = onMove,
             )
 
             Button(
                 onClick = onSync,
                 enabled = !state.syncing,
+                modifier = Modifier.fillMaxWidth(),
             ) {
-                Text(if (state.syncing) "正在同步..." else "同步时间")
+                if (state.syncing) {
+                    CircularProgressIndicator(
+                        modifier = Modifier
+                            .padding(end = 8.dp)
+                            .size(18.dp),
+                        strokeWidth = 2.dp,
+                    )
+                    Text("正在同步...")
+                } else {
+                    Text("同步时间", fontSize = 16.sp)
+                }
             }
 
-            InfoRow(label = "本机时间", value = TimeFormat.format(now))
-            InfoRow(label = "NTP服务器时间", value = TimeFormat.format(state.ntpTime))
-            InfoRow(label = "时间偏差", value = TimeFormat.formatOffset(state.offsetMillis))
-            InfoRow(label = "网络延迟", value = TimeFormat.formatDelay(state.delayMillis))
+            TimeCards(now = now, state = state)
+
+            OffsetHeroCard(state = state)
 
             StatusCard(state = state)
         }
     }
 }
 
-/** 标签 + 数值两行展示 */
+/** 顶部标题区 */
 @Composable
-fun InfoRow(label: String, value: String) {
-    Column(
-        modifier = Modifier.fillMaxWidth(),
-        verticalArrangement = Arrangement.spacedBy(2.dp),
+fun Header() {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         Text(
-            text = label,
-            style = MaterialTheme.typography.labelMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            text = "◷",
+            fontSize = 40.sp,
+            color = MaterialTheme.colorScheme.primary,
         )
+        Column {
+            Text(
+                text = "NTP 校时",
+                style = MaterialTheme.typography.headlineSmall,
+                fontWeight = FontWeight.Bold,
+            )
+            Text(
+                text = "多服务器按序优选 · 局域网 / 公网",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
+}
+
+/** 服务器列表卡片：增 / 删 / 排序，顺序即同步优先级 */
+@Composable
+fun ServerListCard(
+    state: SyncUiState,
+    onNewInput: (String) -> Unit,
+    onAdd: () -> Unit,
+    onRemove: (Int) -> Unit,
+    onMove: (Int, Int) -> Unit,
+) {
+    ElevatedCard(modifier = Modifier.fillMaxWidth()) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            Text(
+                text = "NTP 服务器（按顺序尝试）",
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.Bold,
+            )
+            if (state.servers.isEmpty()) {
+                Text(
+                    text = "暂无服务器，请在下方添加",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            state.servers.forEachIndexed { index, item ->
+                ServerRow(
+                    index = index,
+                    item = item,
+                    isActive = item.address == state.activeServer,
+                    syncing = state.syncing,
+                    onRemove = { onRemove(index) },
+                    onMoveUp = { onMove(index, -1) },
+                    onMoveDown = { onMove(index, 1) },
+                )
+                if (index < state.servers.lastIndex) {
+                    HorizontalDivider()
+                }
+            }
+
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                OutlinedTextField(
+                    value = state.newInput,
+                    onValueChange = onNewInput,
+                    label = { Text("添加服务器") },
+                    placeholder = { Text(SettingsStore.DEFAULT_SERVER) },
+                    singleLine = true,
+                    enabled = !state.syncing,
+                    isError = state.inputError != null,
+                    supportingText = state.inputError?.let { { Text(it) } },
+                    modifier = Modifier.weight(1f),
+                )
+                FilledTonalButton(
+                    onClick = onAdd,
+                    enabled = !state.syncing,
+                ) {
+                    Text("添加")
+                }
+            }
+        }
+    }
+}
+
+/** 服务器列表中的一行：序号 + 地址 + 状态 + 上移/下移/删除 */
+@Composable
+fun ServerRow(
+    index: Int,
+    item: ServerUiItem,
+    isActive: Boolean,
+    syncing: Boolean,
+    onRemove: () -> Unit,
+    onMoveUp: () -> Unit,
+    onMoveDown: () -> Unit,
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
         Text(
-            text = value,
-            style = MaterialTheme.typography.bodyLarge,
+            text = "${index + 1}",
+            style = MaterialTheme.typography.titleMedium,
+            fontWeight = FontWeight.Bold,
+            color = MaterialTheme.colorScheme.primary,
+            modifier = Modifier.padding(end = 8.dp),
         )
+        Column(modifier = Modifier.weight(1f)) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                Text(
+                    text = statusGlyph(item.lastOk),
+                    fontSize = 14.sp,
+                    color = statusColor(item.lastOk),
+                )
+                Text(
+                    text = item.address,
+                    style = MaterialTheme.typography.bodyLarge,
+                    fontWeight = if (isActive) FontWeight.Bold else FontWeight.Normal,
+                )
+            }
+            if (isActive) {
+                Text(
+                    text = "本次使用",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.primary,
+                )
+            } else if (item.lastOk == false && item.lastError.isNotEmpty()) {
+                Text(
+                    text = item.lastError,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.error,
+                )
+            }
+        }
+        TextButton(onClick = onMoveUp, enabled = !syncing) { Text("↑") }
+        TextButton(onClick = onMoveDown, enabled = !syncing) { Text("↓") }
+        TextButton(onClick = onRemove, enabled = !syncing) { Text("删除") }
+    }
+}
+
+/** 尝试状态图标：✓ 成功 / ✕ 失败 / • 未尝试 */
+@Composable
+fun statusGlyph(lastOk: Boolean?): String = when (lastOk) {
+    true -> "✓"
+    false -> "✕"
+    null -> "•"
+}
+
+@Composable
+fun statusColor(lastOk: Boolean?): Color {
+    val colors = MaterialTheme.colorScheme
+    return when (lastOk) {
+        true -> colors.primary
+        false -> colors.error
+        null -> colors.onSurfaceVariant
+    }
+}
+
+/** 本机时间 / NTP 时间双卡片 */
+@Composable
+fun TimeCards(now: Long, state: SyncUiState) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        ElevatedCard(modifier = Modifier.weight(1f)) {
+            Column(modifier = Modifier.padding(12.dp)) {
+                Text(
+                    text = "本机时间",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Text(
+                    text = TimeFormat.format(now),
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.Medium,
+                )
+            }
+        }
+        ElevatedCard(modifier = Modifier.weight(1f)) {
+            Column(modifier = Modifier.padding(12.dp)) {
+                Text(
+                    text = "NTP 时间",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Text(
+                    text = TimeFormat.format(state.ntpTime),
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.Medium,
+                )
+            }
+        }
+    }
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        ElevatedCard(modifier = Modifier.weight(1f)) {
+            Column(modifier = Modifier.padding(12.dp)) {
+                Text(
+                    text = "网络延迟",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Text(
+                    text = TimeFormat.formatDelay(state.delayMillis),
+                    style = MaterialTheme.typography.bodyLarge,
+                    fontWeight = FontWeight.Medium,
+                )
+            }
+        }
+        ElevatedCard(modifier = Modifier.weight(1f)) {
+            Column(modifier = Modifier.padding(12.dp)) {
+                Text(
+                    text = "授时服务",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Text(
+                    text = state.activeServer ?: "--",
+                    style = MaterialTheme.typography.bodyLarge,
+                    fontWeight = FontWeight.Medium,
+                )
+            }
+        }
+    }
+}
+
+/** 时间偏差大字展示：核心数据一眼可见 */
+@Composable
+fun OffsetHeroCard(state: SyncUiState) {
+    ElevatedCard(modifier = Modifier.fillMaxWidth()) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(vertical = 12.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            Text(
+                text = "时间偏差",
+                style = MaterialTheme.typography.labelLarge,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Text(
+                text = TimeFormat.formatOffset(state.offsetMillis),
+                fontSize = 40.sp,
+                fontWeight = FontWeight.Bold,
+                color = if (state.offsetMillis == null) {
+                    MaterialTheme.colorScheme.onSurfaceVariant
+                } else {
+                    MaterialTheme.colorScheme.primary
+                },
+            )
+        }
     }
 }
 
@@ -267,19 +630,30 @@ fun StatusCard(state: SyncUiState) {
         StatusKind.FAILED -> colors.errorContainer
         else -> colors.surfaceVariant
     }
-    Card(
+    val onContainer = when (state.statusKind) {
+        StatusKind.SUCCESS -> colors.onPrimaryContainer
+        StatusKind.NO_PERMISSION -> colors.onTertiaryContainer
+        StatusKind.FAILED -> colors.onErrorContainer
+        else -> colors.onSurfaceVariant
+    }
+    ElevatedCard(
         modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(containerColor = container),
+        colors = CardDefaults.elevatedCardColors(containerColor = container),
     ) {
-        Column(modifier = Modifier.padding(16.dp)) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
             Text(
                 text = "状态",
                 style = MaterialTheme.typography.labelMedium,
+                color = onContainer,
             )
             Text(
                 text = state.statusText,
                 style = MaterialTheme.typography.bodyLarge,
                 textAlign = TextAlign.Start,
+                color = onContainer,
             )
         }
     }

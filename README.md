@@ -3,8 +3,9 @@
 一个极简的安卓校时工具 App，唯一功能：**从局域网 NTP 服务器获取准确时间，
 并尝试同步 Android 设备的系统时间**。
 
-- **NTP 服务器地址输入框**（默认 `192.168.1.100`，支持 `IP` / `IP:端口` / 域名）
-- **“同步时间”按钮**（同步中变为“正在同步...”，防止重复点击）
+- **多 NTP 服务器**：可添加多个地址（默认 `ntp.aliyun.com`，支持 `IP` / `IP:端口` / 域名），
+  列表可上移 / 下移排序，同步时按顺序逐个尝试，第一个成功的即用于本次校时
+- **“同步时间”按钮**（同步中显示进度圈并变为“正在同步...”，防止重复点击）
 - **当前设备时间**（每秒刷新）、**NTP 服务器时间**、**时间偏差**、**网络延迟**、**同步状态**
 - 每次打开 App 自动读取上次保存的地址并同步一次
 - 严格区分“NTP 获取成功”和“系统时间修改成功”，**绝不伪造“同步成功”**
@@ -15,21 +16,22 @@
 
 | 功能 | 说明 |
 | --- | --- |
-| NTP 查询 | 标准 NTP over UDP 123，自研轻量客户端（`NtpClient` + `NtpPacket`），按 RFC 5905 计算 offset / delay |
+| NTP 查询 | 标准 NTP over UDP 123，自研轻量客户端（`NtpClient` + `NtpPacket`），按 RFC 5905 计算 offset / delay；多服务器按序优选 |
 | 精度处理 | T1 用 `System.currentTimeMillis`，T4 用 `elapsedRealtime` 差值推算，避免收包期间时钟跳变污染 RTT |
 | 系统时间同步 | `DeviceOwnerTimeSynchronizer` 经 `DevicePolicyManager.setTime()` 修改（需 Device Owner，API 26+） |
 | 诚实上报 | 无权限时明确显示“当前应用没有修改系统时间的权限”，并照常展示 NTP 时间 / 本机时间 / 偏差 |
-| 地址存档 | DataStore 保存上次输入的地址，下次启动自动使用 |
-| 自动同步 | 打开 App 即同步一次；超时 3000ms；所有网络操作在 `Dispatchers.IO`，异常全部兜底 |
+| 地址存档 | DataStore 保存服务器地址列表（含顺序），下次启动自动使用；老版本单地址自动迁移 |
+| 自动同步 | 打开 App 即按顺序同步一次；超时 3000ms；所有网络操作在 `Dispatchers.IO`，异常全部兜底 |
 
 ## NTP 同步工作流程
 
 ```text
 启动 App
   ↓
-读取 DataStore 保存的 NTP 地址（默认 192.168.1.100，缺省端口 UDP 123）
+读取 DataStore 保存的 NTP 地址列表（默认 ntp.aliyun.com，缺省端口 UDP 123）
   ↓
-UDP 发送 NTP 请求（T1），收到应答（T2/T3/T4）
+按顺序逐个 UDP 发送 NTP 请求，第一个成功的服务器用于本次校时
+（T1/T2/T3/T4，失败的自动试下一个）
   ↓
 offset = ((T2-T1) + (T3-T4)) / 2，delay = (T4-T1) - (T3-T2)
   ↓
