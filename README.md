@@ -53,17 +53,9 @@ adb shell pm grant com.example.ntpsync android.permission.WRITE_SECURE_SETTINGS
 之后打开 App：看一眼「系统 NTP」卡片确认已授权 → 点任意服务器右侧
 「设为系统」→ 系统在后台完成同步（通常 1 分钟内生效）。
 
-### 免电脑授权（Shizuku，备用方案）
-
-shell 身份只能由系统亲手交出来，普通 App 自己变不出来，
- 所以 Shizuku 必须是一个独立 App（它负责接特权再分发）。
- 步骤（全程手机操作，不用电脑）：
-
-1. 安装 Shizuku（官网或 GitHub：RikkaApps/Shizuku）；
-2. 按 Shizuku 内向导完成无线调试配对并启动它（Android 11+）；
-3. 打开本 App，「系统 NTP」卡片点「刷新」，出现「通过 Shizuku 一键授权」→ 点它，
-   在 Shizuku 弹窗里允许；
-4. 授权成功后 Shizuku 即可停用，本 App 永久可用（卸载重装才需重来）。
+> 说明：曾尝试用 Shizuku 实现“免电脑一键授权”，但查官方源码确认
+> Shizuku 13+ 已把“替 App 跑 shell 命令”的 API 设为私有（计划在 14 彻底删除），
+> 此路不通，已 revert。免电脑只剩“普通用户 3 步手动填”可用。
 
 不想用 App 也行，直接三行命令（每台设备一次，永久生效）：
 

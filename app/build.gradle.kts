@@ -68,8 +68,6 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.7")
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.7")
     implementation("androidx.activity:activity-compose:1.10.1")
-    // Shizuku 客户端：免电脑一次性自授权（用户需另装 Shizuku 并配对一次）
-    implementation("dev.rikka.shizuku:api:13.1.5")
     // NTP 服务器地址持久化（不使用 SQLite）
     implementation("androidx.datastore:datastore-preferences:1.1.1")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.1")
