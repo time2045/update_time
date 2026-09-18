@@ -1,8 +1,10 @@
 package com.example.ntpsync
 
 import android.app.Application
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Bundle
+import android.provider.Settings
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -32,6 +34,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -468,6 +471,8 @@ fun SyncScreen(
             now = System.currentTimeMillis()
         }
     }
+    // 技术员功能默认收起，普通用户只看三步向导
+    var showAdvanced by remember { mutableStateOf(false) }
 
     Scaffold(modifier = Modifier.fillMaxSize()) { padding ->
         Column(
@@ -479,21 +484,6 @@ fun SyncScreen(
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
             Header()
-
-            ServerListCard(
-                state = state,
-                onNewInput = onNewInput,
-                onAdd = onAdd,
-                onRemove = onRemove,
-                onMove = onMove,
-                onApplySystem = onApplySystem,
-            )
-
-            SystemNtpCard(
-                state = state,
-                onRefresh = onRefreshSystem,
-                onShizukuGrant = onShizukuGrant,
-            )
 
             Button(
                 onClick = onSync,
@@ -509,7 +499,7 @@ fun SyncScreen(
                     )
                     Text("正在同步...")
                 } else {
-                    Text("同步时间", fontSize = 16.sp)
+                    Text("获取准确时间", fontSize = 16.sp)
                 }
             }
 
@@ -517,7 +507,34 @@ fun SyncScreen(
 
             OffsetHeroCard(state = state)
 
+            // 普通用户三步：看准时间 → 跳系统设置 → 照着填
+            GuideCard(ntpTime = state.ntpTime)
+
             StatusCard(state = state)
+
+            // 技术员功能默认收起：多服务器管理、系统 NTP 一键切换
+            TextButton(
+                onClick = { showAdvanced = !showAdvanced },
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text(if (showAdvanced) "收起高级设置 ↑" else "高级设置（多服务器 / 一键切换） ↓")
+            }
+            if (showAdvanced) {
+                ServerListCard(
+                    state = state,
+                    onNewInput = onNewInput,
+                    onAdd = onAdd,
+                    onRemove = onRemove,
+                    onMove = onMove,
+                    onApplySystem = onApplySystem,
+                )
+
+                SystemNtpCard(
+                    state = state,
+                    onRefresh = onRefreshSystem,
+                    onShizukuGrant = onShizukuGrant,
+                )
+            }
         }
     }
 }
@@ -545,6 +562,58 @@ fun Header() {
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
+        }
+    }
+}
+
+/** 普通用户三步向导：普通手机上 App 改不了系统时间，照着填最靠谱 */
+@Composable
+fun GuideCard(ntpTime: Long?) {
+    val clipboard = LocalClipboardManager.current
+    val context = LocalContext.current
+    ElevatedCard(modifier = Modifier.fillMaxWidth()) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Text(
+                text = "3 步对好时间（不用电脑）",
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.Bold,
+            )
+            Text(
+                text = "1. 记住下面的准确时间\n" +
+                    "2. 点按钮跳到系统设置，关掉「自动确定日期和时间」\n" +
+                    "3. 照着准确时间手动填进去",
+                style = MaterialTheme.typography.bodyMedium,
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                FilledTonalButton(
+                    onClick = {
+                        val text = TimeFormat.format(ntpTime)
+                        clipboard.setText(AnnotatedString(text))
+                        Toast.makeText(context, "准确时间已复制：$text", Toast.LENGTH_SHORT).show()
+                    },
+                    enabled = ntpTime != null,
+                ) {
+                    Text("复制准确时间")
+                }
+                Button(
+                    onClick = {
+                        try {
+                            context.startActivity(
+                                Intent(Settings.ACTION_DATE_SETTINGS)
+                                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                            )
+                        } catch (e: Exception) {
+                            Toast.makeText(context, "打不开系统设置，请手动进入", Toast.LENGTH_SHORT)
+                                .show()
+                        }
+                    },
+                ) {
+                    Text("去系统设置改时间")
+                }
+            }
         }
     }
 }
