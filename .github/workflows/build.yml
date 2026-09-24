@@ -48,20 +48,10 @@ jobs:
           cp app/build/outputs/apk/release/*.apk "renamed/ntp-sync-release-v1.0.${VER}.apk"
           cp app/build/outputs/apk/debug/*.apk "renamed/ntp-sync-debug-v1.0.${VER}.apk"
 
-      - name: Upload APK
-        uses: actions/upload-artifact@v4
-        with:
-          name: ntp-sync-apk
-          path: renamed/ntp-sync-release-v*.apk
-          if-no-files-found: error
-
-      - name: Upload debug APK
-        uses: actions/upload-artifact@v4
-        with:
-          name: ntp-sync-debug-apk
-          path: renamed/ntp-sync-debug-v*.apk
-          if-no-files-found: error
-
+      # ⚠️ 「发布」必须排在 Artifact 上传之前。
+      # Actions Artifacts 有存储配额（私有仓库免费额度 500MB），配额爆了上传会报
+      # "Artifact storage quota has been hit" 并让该步骤失败；一旦发布排在它后面，
+      # 就会被拖累到整个 job 中断、APK 发不出去。发布优先，上传只作附带副本。
       - name: Publish Release with APKs
         if: github.event_name != 'pull_request'
         uses: softprops/action-gh-release@v2
@@ -80,3 +70,23 @@ jobs:
             - **Debug 安装包**：[ntp-sync-debug-v1.0.${{ github.run_number }}.apk](https://github.com/${{ github.repository }}/releases/download/v1.0.${{ github.run_number }}/ntp-sync-debug-v1.0.${{ github.run_number }}.apk)
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # 附带副本：continue-on-error 让配额爆时只标记本步骤失败，不再中断整个构建；
+      # retention-days: 3 控制长期占用（默认保留 90 天是攒爆配额的主因）。
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        continue-on-error: true
+        with:
+          name: ntp-sync-apk
+          path: renamed/ntp-sync-release-v*.apk
+          retention-days: 3
+          if-no-files-found: error
+
+      - name: Upload debug APK
+        uses: actions/upload-artifact@v4
+        continue-on-error: true
+        with:
+          name: ntp-sync-debug-apk
+          path: renamed/ntp-sync-debug-v*.apk
+          retention-days: 3
+          if-no-files-found: error
